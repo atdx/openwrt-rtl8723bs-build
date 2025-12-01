@@ -1,0 +1,95 @@
+name: Build OpenWrt kmod-rtl8723bs (024c:b723)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential libncurses5-dev zlib1g-dev \
+            gawk flex gettext wget unzip python3 rsync time
+
+      - name: Clone OpenWrt
+        run: |
+          git clone https://git.openwrt.org/openwrt/openwrt.git
+          cd openwrt
+          # OPTIONAL: checkout ke commit tertentu kalau mau fix
+          # git checkout <commit-hash>
+
+      - name: Configure target and feeds
+        working-directory: openwrt
+        run: |
+          # Contoh: x86_64
+          cp ./targets/x86_64.config .config || true
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # Pastikan defconfig dijalankan
+          yes "" | make defconfig
+
+      - name: Enable kmod-rtl8723bs in .config
+        working-directory: openwrt
+        run: |
+          # Tambah paket kmod-rtl8723bs di .config
+          ./scripts/diffconfig.sh > seed.config || true
+          { echo "CONFIG_PACKAGE_kmod-rtl8723bs=m"; cat seed.config; } > .config.new
+          mv .config.new .config
+          yes "" | make defconfig
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j$(nproc)
+
+      - name: Apply rtl8723bs 024c:b723 patch
+        working-directory: openwrt
+        run: |
+          # Cari direktori sumber kernel (staging drivers)
+          KDIR=$(find build_dir -maxdepth 3 -type d -name "linux-*" | head -n1 || true)
+          if [ -z "$KDIR" ]; then
+            echo "Kernel dir not found"; exit 1
+          fi
+
+          # Tampilkan path untuk debugging
+          echo "Kernel dir: $KDIR"
+
+          # Coba apply patch ke driver r8723bs
+          # SESUAIKAN path target file dengan pohon openwrt yang sebenarnya
+          patch -p1 << 'EOF'
+--- a/drivers/staging/rtl8723bs/os_dep/sdio_intf.c
++++ b/drivers/staging/rtl8723bs/os_dep/sdio_intf.c
+@@ -50,6 +50,7 @@ static const struct sdio_device_id sdio_ids[] = {
+     { SDIO_DEVICE(0x024c, 0x0523) },
+     { SDIO_DEVICE(0x024c, 0x0623) },
+     { SDIO_DEVICE(0x024c, 0x0626) },
++    { SDIO_DEVICE(0x024c, 0xb723) },
+     { /* end: all zero */ }
+ };
+ MODULE_DEVICE_TABLE(sdio, sdio_ids);
+EOF
+
+      - name: Build kmod-rtl8723bs only
+        working-directory: openwrt
+        run: |
+          make package/kernel/mac80211/compile V=s -j$(nproc)
+
+      - name: Collect built kmod
+        working-directory: openwrt
+        run: |
+          mkdir -p ../artifacts
+          find bin -name "*rtl8723bs*" -type f -print -exec cp {} ../artifacts/ \;
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-rtl8723bs-024c-b723
+          path: artifacts/
