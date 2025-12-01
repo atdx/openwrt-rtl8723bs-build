@@ -11,93 +11,87 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Install build deps
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git build-essential libncurses5-dev zlib1g-dev \
-            gawk flex gettext wget unzip python3 rsync time
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-distutils rsync unzip zlib1g-dev file wget time
 
       - name: Clone OpenWrt
         run: |
           git clone https://git.openwrt.org/openwrt/openwrt.git
           cd openwrt
 
-      - name: Config x86_64 & feeds
+      - name: Update and install feeds
         working-directory: openwrt
         run: |
-          make defconfig
-          sed -i 's/^CONFIG_TARGET_.*=.*/# CONFIG_TARGET_.* is not set/' .config || true
-          cat << 'EOF' >> .config
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure for x86_64 and enable kmod-rtl8723bs
+        working-directory: openwrt
+        run: |
+          cat > .config << 'EOF'
 CONFIG_TARGET_x86=y
 CONFIG_TARGET_x86_64=y
 CONFIG_TARGET_x86_64_DEVICE_generic=y
+CONFIG_PACKAGE_kmod-rtl8723bs=m
 EOF
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          yes "" | make defconfig
+          make defconfig
 
-      - name: Enable kmod-rtl8723bs
+      - name: Download source packages
         working-directory: openwrt
         run: |
-          ./scripts/diffconfig.sh > seed.config || true
-          echo "CONFIG_PACKAGE_kmod-rtl8723bs=m" >> seed.config
-          mv seed.config .config
-          yes "" | make defconfig
+          make download -j$(nproc) V=s
 
-      - name: Download sources
+      - name: Patch rtl8723bs driver to add SDIO ID 024c:b723
         working-directory: openwrt
         run: |
-          make download -j"$(nproc)"
-
-      - name: Patch rtl8723bs SDIO ID
-        working-directory: openwrt
-        run: |
-          KDIR=$(find build_dir -maxdepth 6 -type d -name "linux-*" | head -n1 || true)
-          if [ -z "$KDIR" ]; then
-            echo "Kernel dir not found"; exit 1
+          # Tunggu sampai kernel source di-extract
+          make target/linux/compile -j1 V=s IGNORE_ERRORS='n m' || true
+          
+          # Cari file sdio_intf.c
+          SDIO_FILE=$(find build_dir -path "*/drivers/staging/rtl8723bs/os_dep/sdio_intf.c" 2>/dev/null | head -n1)
+          
+          if [ -z "$SDIO_FILE" ]; then
+            echo "Error: sdio_intf.c not found"
+            exit 1
           fi
-          echo "Kernel dir: $KDIR"
-          cd "$KDIR"/..
-
-          FILE=$(find . -path "*drivers/staging/rtl8723bs/os_dep/sdio_intf.c" | head -n1 || true)
-          if [ -z "$FILE" ]; then
-            echo "sdio_intf.c not found"; exit 1
+          
+          echo "Found sdio_intf.c at: $SDIO_FILE"
+          
+          # Backup original
+          cp "$SDIO_FILE" "$SDIO_FILE.bak"
+          
+          # Tambahkan ID 024c:b723 menggunakan sed
+          sed -i '/{ SDIO_DEVICE(0x024c, 0x0626) },/a\    { SDIO_DEVICE(0x024c, 0xb723) },' "$SDIO_FILE"
+          
+          # Verifikasi patch berhasil
+          if grep -q "0xb723" "$SDIO_FILE"; then
+            echo "Patch successful: ID 024c:b723 added"
+            grep -A2 -B2 "0xb723" "$SDIO_FILE"
+          else
+            echo "Patch failed"
+            exit 1
           fi
-          echo "Patching: $FILE"
-
-          python3 - << 'EOF'
-from pathlib import Path
-
-path = Path(r"""$FILE""")
-text = path.read_text()
-
-needle = """    { SDIO_DEVICE(0x024c, 0x0626) },"""
-insert = """    { SDIO_DEVICE(0x024c, 0x0626) },
-    { SDIO_DEVICE(0x024c, 0xb723) },"""
-
-if insert in text:
-    print("ID 0xb723 already present, nothing to do")
-else:
-    if needle not in text:
-        raise SystemExit("Pattern not found in sdio_intf.c")
-    text = text.replace(needle, insert)
-    path.write_text(text)
-    print("Patched 024c:b723 into", path)
-EOF
 
       - name: Build kmod-rtl8723bs
         working-directory: openwrt
         run: |
-          make package/kernel/mac80211/compile V=s -j"$(nproc)"
+          make package/kernel/mac80211/compile -j$(nproc) V=s
 
       - name: Collect artifacts
         working-directory: openwrt
         run: |
           mkdir -p ../artifacts
-          find bin -iname "*rtl8723bs*" -type f -print -exec cp {} ../artifacts/ \;
+          find bin/targets -name "*rtl8723bs*" -type f -exec cp {} ../artifacts/ \;
+          find bin/packages -name "*rtl8723bs*" -type f -exec cp {} ../artifacts/ \;
+          ls -lh ../artifacts/
 
-      - name: Upload artifacts
+      - name: Upload kmod-rtl8723bs package
         uses: actions/upload-artifact@v4
         with:
-          name: kmod-rtl8723bs-x86_64-024c-b723
-          path: artifacts/
+          name: kmod-rtl8723bs-x86_64-patched
+          path: artifacts/*
+          if-no-files-found: error
