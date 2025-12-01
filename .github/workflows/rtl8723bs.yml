@@ -1,0 +1,98 @@
+name: kmod-rtl8723bs
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential libncurses5-dev zlib1g-dev \
+            gawk flex gettext wget unzip python3 rsync time
+
+      - name: Clone OpenWrt
+        run: |
+          git clone https://git.openwrt.org/openwrt/openwrt.git
+          cd openwrt
+
+      - name: Configure x86_64 target and feeds
+        working-directory: openwrt
+        run: |
+          make defconfig
+
+          # Set target ke x86_64 generic
+          sed -i 's/^CONFIG_TARGET_.*=.*/# CONFIG_TARGET_.* is not set/' .config || true
+          echo "CONFIG_TARGET_x86=y" >> .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+          echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          yes "" | make defconfig
+
+      - name: Enable kmod-rtl8723bs in .config
+        working-directory: openwrt
+        run: |
+          ./scripts/diffconfig.sh > seed.config || true
+          {
+            echo "CONFIG_PACKAGE_kmod-rtl8723bs=m"
+          } >> seed.config
+          mv seed.config .config
+          yes "" | make defconfig
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j$(nproc)
+
+      - name: Apply rtl8723bs 024c:b723 patch
+        working-directory: openwrt
+        run: |
+          KDIR=$(find build_dir -maxdepth 6 -type d -name "linux-*" | head -n1 || true)
+          if [ -z "$KDIR" ]; then
+            echo "Kernel dir not found"; exit 1
+          fi
+          echo "Kernel dir: $KDIR"
+          cd "$KDIR"/..
+
+          if ! find . -path "*drivers/staging/rtl8723bs/os_dep/sdio_intf.c" | grep -q sdio_intf.c; then
+            echo "sdio_intf.c not found, tree layout may have changed"
+            exit 1
+          fi
+
+          patch -p1 << 'EOF'
+--- a/drivers/staging/rtl8723bs/os_dep/sdio_intf.c
++++ b/drivers/staging/rtl8723bs/os_dep/sdio_intf.c
+@@ -50,6 +50,7 @@ static const struct sdio_device_id sdio_ids[] = {
+     { SDIO_DEVICE(0x024c, 0x0523) },
+     { SDIO_DEVICE(0x024c, 0x0623) },
+     { SDIO_DEVICE(0x024c, 0x0626) },
++    { SDIO_DEVICE(0x024c, 0xb723) },
+     { /* end: all zero */ }
+ };
+ MODULE_DEVICE_TABLE(sdio, sdio_ids);
+EOF
+
+      - name: Build kmod-rtl8723bs only
+        working-directory: openwrt
+        run: |
+          make package/kernel/mac80211/compile V=s -j$(nproc)
+
+      - name: Collect built kmod
+        working-directory: openwrt
+        run: |
+          mkdir -p ../artifacts
+          find bin -name "*rtl8723bs*" -type f -print -exec cp {} ../artifacts/ \;
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmod-rtl8723bs-x86_64-024c-b723
+          path: artifacts/
