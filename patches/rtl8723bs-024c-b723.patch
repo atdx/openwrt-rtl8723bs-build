@@ -1,0 +1,10 @@
+--- a/drivers/staging/rtl8723bs/os_dep/sdio_intf.c
++++ b/drivers/staging/rtl8723bs/os_dep/sdio_intf.c
+@@ -50,6 +50,7 @@ static const struct sdio_device_id sdio_ids[] = {
+     { SDIO_DEVICE(0x024c, 0x0523) },
+     { SDIO_DEVICE(0x024c, 0x0623) },
+     { SDIO_DEVICE(0x024c, 0x0626) },
++    { SDIO_DEVICE(0x024c, 0xb723) },
+     { /* end: all zero */ }
+ };
+ MODULE_DEVICE_TABLE(sdio, sdio_ids);
